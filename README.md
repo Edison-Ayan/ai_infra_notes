@@ -24,7 +24,7 @@ ai-infra-notes/
 
 | 编号 | 主题 | 状态 | 一句话 |
 |---|---|---|---|
-| [01](topics/01-nsys-profiling/) | Nsight Systems 性能分析 | ✅ 进行中 | 系统级时间线，定位瓶颈在哪段：nvtx/kernel/api/memcpy 四视角 |
+| [01](topics/01-nsys-profiling/) | Nsight Systems / Compute 性能分析 | ✅ 进行中 | nsys 看时间线定位瓶颈段 + ncu 微观挖 kernel；register blocking 把 GEMM 从 6%→36% FP32 |
 
 ## 面试题
 
@@ -35,10 +35,11 @@ ai-infra-notes/
 ## 学习日志
 
 - **2026-06-04** 搭建本仓库。完成主题 01：nsys 基础——用自写的 `gemm_lab`（naive vs tiled GEMM + launch-bound 演示）过了一遍 nvtx_sum / cuda_gpu_kern_sum / cuda_api_sum 四张表的读法。整理快手二面 6 道题。
+- **2026-06-04** 主题 01 扩展四个实验（见 [topics/01 README](topics/01-nsys-profiling/)）：① pinned 内存让 D2H 带宽 2.9×；② ncu 深挖出 GEMM 只跑 6% FP32 的真因（低算访比 + LG/MIO throttle，**别信 SM Throughput**）；③ GUI 时间线肉眼识别 launch-bound 的"带缝小块"；④ register blocking（每线程 4×4）把 FP32 6%→36%、4.5× 加速，并用 ncu 验证 IPC/occupancy 变化（**拿 occupancy 换 ILP**）。
 
 ## TODO / 下一步
 
 - [ ] 主题 01：实测 CUDA Graph 消除 launch bound（前后 profile 对比）
-- [ ] 主题 01：学 Nsight Systems GUI 时间线（泳道 / gap / overlap）
-- [ ] 主题 02：ncu（Nsight Compute）单 kernel 微观分析——occupancy / 访存 / warp stall
-- [ ] 主题：cuBLAS vs 手写 GEMM 的差距来源（register tiling / double buffering）
+- [x] 主题 01：学 Nsight Systems GUI 时间线（泳道 / gap / overlap）
+- [x] 主题 02：ncu（Nsight Compute）单 kernel 微观分析——occupancy / 访存 / warp stall
+- [ ] 主题 01：GEMM 继续优化向 cuBLAS（`float4` 向量化 / shared double buffering / 消 bank conflict / warp tiling）

@@ -4,9 +4,9 @@
 *.exp
 *.lib
 a.out
-# 各主题 labs 下编译出来的可执行文件（无后缀）：忽略 gemm_lab 及其变体，
-# 但保留源码/脚本
+# 各主题 labs 下编译出来的可执行文件（无后缀）：忽略二进制，但保留源码/脚本
 **/labs/gemm_lab*
+**/labs/cublas_ref
 !**/labs/*.cu
 !**/labs/*.sh
 !**/labs/*.md

@@ -95,7 +95,24 @@ sudo update-initramfs -u && sudo reboot
 - **Compute(SM) 从 99% 降到 54.6% 是好事**：不再有单一管线吃满，负载均衡了。判断好坏看 FP32%。
 - **ILP 起来了**：16 个独立累加器 → IPC 翻倍、发射间隔 42→15.9 cycle。
 - **Occupancy 反降到 64.8% 也没关系**：每线程吃更多寄存器 → 每 SM warp 变少。**register blocking 本质是拿 occupancy 换 ILP**，这里换得值。「高 occupancy=高性能」是误区。
-- 仍是 MIO bound（35%），下一档：`float4` 向量化、shared memory double buffering、更大 tile、消 bank conflict、warp tiling → 目标向 cuBLAS 的 10+ TFLOPS。
+- 仍是 MIO bound（35%），下一档：`float4` 向量化、shared memory double buffering、更大 tile、消 bank conflict、warp tiling → 目标向 cuBLAS 看齐。
+
+## 参照基准：手写 GEMM 该追谁
+
+两个参照点（同尺寸 N=2048 FP32，本机实测，见 [labs/cublas_ref.cu](labs/cublas_ref.cu)）：
+
+| 实现 | 时间 | TFLOPS | 占 cuBLAS | 占硬件峰值 |
+|---|---|---|---|---|
+| naive | 23.9 ms | 0.72 | 10% | 6% |
+| tiled | 18.4 ms | 0.94 | 14% | 8% |
+| **reg (本实验)** | 4.07 ms | **4.22** | **61%** | 36% |
+| **cuBLAS** ⭐ | 2.47 ms | **6.95** | 100% | ~58% |
+| 硬件 roofline | — | ~12 | — | 100% |
+
+- **cuBLAS 才是现实目标**，不是硬件峰值。纯 FP32 SGEMM 受访存层级限制，连 cuBLAS 也只摸到峰值 ~58%；roofline 是天花板，谁都到不了。
+- reg 已到 cuBLAS 的 61%——剩下差距靠 `float4`/double buffering/warp tiling 等工业技巧。
+- **前提**：cuBLAS 这 6.95 是**纯 FP32** 路径。若允许 TF32 / tensor core（精度略降）会跳到几十 TFLOPS，那是另一条赛道；手写 FP32 CUDA core 就该和 cuBLAS 的 FP32 路径比。
+- 跑法：`nvcc -O3 -arch=sm_89 -I<cuda>/include cublas_ref.cu -o cublas_ref -lcublas && ./cublas_ref`。
 
 ## 两个最该记住的反直觉
 

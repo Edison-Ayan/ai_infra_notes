@@ -1,0 +1,23 @@
+# 编译产物
+*.o
+*.exe
+*.exp
+*.lib
+a.out
+# 各主题 labs 下编译出来的可执行文件（无后缀），用目录约定忽略
+**/labs/gemm_lab
+**/labs/*_lab
+**/labs/*.out
+
+# Profiling 报告（体积大，不入库）
+*.nsys-rep
+*.sqlite
+*.ncu-rep
+*.qdrep
+
+# 临时/系统
+*.tmp
+.DS_Store
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

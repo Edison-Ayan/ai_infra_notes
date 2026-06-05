@@ -121,6 +121,42 @@ sudo update-initramfs -u && sudo reboot
 
 离 cuBLAS 最后 12%：double buffering（搬运/计算重叠，消同步气泡）、warp tiling（消 bank conflict）。
 
+## 实验⑥：两次 double buffering 翻车——踩坑实录
+
+试图把 float4(6.13) 往 cuBLAS 推，做了两版双缓冲，**都比 float4 慢**。两个负结果都极有价值。
+
+| 指标 | float4 | db(手动预取) | cpasync |
+|---|---|---|---|
+| TFLOPS | **6.13** ⭐ | 5.40 | 5.12 |
+| 寄存器/线程 | 127 | 129 | **92** |
+| Occupancy | 32% | **16.7%** | 33.3% |
+| L1/TEX 吞吐 | 82.9% | 72.6% | **92.8%** |
+| 卡在哪 | 均衡 | **寄存器悬崖** | shared 读(标量 regM) |
+
+### 坑①：寄存器悬崖（db 版，[labs/gemm_lab_db.cu](labs/gemm_lab_db.cu)）
+手动寄存器预取双缓冲，多用了 2 个预取寄存器(`ldA/ldB`)：127→**129**。
+
+**为什么 2 个寄存器让性能暴跌**：occupancy 是**量子化**的——每 SM 能放几个 block 由 `寄存器总量 ÷ (每线程寄存器×blockSize)` **向下取整**。
+- 127×256 = 32512 → 65536/32512 = 2.01 → **2 block/SM**
+- 129×256 = 33024 → 65536/33024 = 1.98 → **1 block/SM**
+
+就跨过这个整数阈值，occupancy 16.7%(腰斩)。预取省的延迟，远不够补 warp 减半的损失。
+
+> **怎么发现的**：优化后变慢 → ncu 看到「寄存器微动 127→129、occupancy 却腰斩」这种**不成比例**变化 → 量子化阈值的指纹 → 算 `65536÷(reg×256)` 的 block 数坐实。
+
+### 坑②：转置 vs cp.async 不可兼得（cpasync 版，[labs/gemm_lab_cpasync.cu](labs/gemm_lab_cpasync.cu)）
+`cp.async` 让 global 直接拷进 shared、绕过寄存器，**确实根除了悬崖**（寄存器 129→92、occupancy 回到 33%）✓。
+但 cp.async 要求两端连续、**不能转置** → As 改非转置 → regM 退回标量读(8×`LDS.32`) → `L1/TEX 82.9%→92.8%`，float4 压下的访存瓶颈又顶回来 ✗。
+
+```
+float4 : 转置→regM能float4(访存少) ✓  预取吃寄存器→悬崖     ✗
+cpasync: cp.async不吃寄存器(无悬崖) ✓  不能转置→regM标量     ✗
+```
+两条路各解决对方的问题、又各踩对方的坑。想兼得需 `ldmatrix` / swizzled 无冲突布局——CUTLASS 级工程量。
+
+### 结论
+**手写 FP32 GEMM 的甜点就在 float4/register-blocking（~88% cuBLAS）**；再往上收益递减、按下葫芦浮起瓢。到此该用 cuBLAS，或换 Tensor Core 赛道。**ncu 让每次失败都可解释**，比盲目变快更有价值。
+
 ## 参照基准：手写 GEMM 该追谁
 
 两个参照点（同尺寸 N=2048 FP32，本机实测，见 [labs/cublas_ref.cu](labs/cublas_ref.cu)）：

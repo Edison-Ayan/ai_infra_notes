@@ -24,6 +24,7 @@ ai-infra-notes/
 | 编号 | 主题 | 状态 | 一句话 |
 |---|---|---|---|
 | [01](topics/01-nsys-profiling/) | Nsight Systems / Compute 性能分析 | ✅ 进行中 | nsys 看时间线定位瓶颈段 + ncu 微观挖 kernel；register blocking 把 GEMM 从 6%→36% FP32 |
+| [02](topics/02-tensor-core/) | Tensor Core GEMM | 🚧 起步 | 换赛道用 Tensor Core(WMMA/FP16)；naive WMMA 因无 shared 复用反而慢——"用了 ≠ 快" |
 
 ## 学习日志
 
@@ -39,4 +40,5 @@ ai-infra-notes/
 - [x] 主题 02：ncu（Nsight Compute）单 kernel 微观分析——occupancy / 访存 / warp stall
 - [x] 主题 01：GEMM `float4` 向量化（→ 88% cuBLAS）
 - [x] 主题 01：double buffering 两版（寄存器悬崖 / cp.async 取舍，均记录踩坑）
-- [ ] 主题 02：Tensor Core GEMM（`wmma`/`mma`，TF32/FP16）——换赛道追算力
+- [x] 主题 02：Tensor Core WMMA 入门（naive，发现无 shared 复用→访存 bound）
+- [ ] 主题 02：shared 分块的 WMMA 喂饱 Tensor Core + 对标 cuBLAS TF32/FP16 路径

@@ -97,6 +97,30 @@ sudo update-initramfs -u && sudo reboot
 - **Occupancy 反降到 64.8% 也没关系**：每线程吃更多寄存器 → 每 SM warp 变少。**register blocking 本质是拿 occupancy 换 ILP**，这里换得值。「高 occupancy=高性能」是误区。
 - 仍是 MIO bound（35%），下一档：`float4` 向量化、shared memory double buffering、更大 tile、消 bank conflict、warp tiling → 目标向 cuBLAS 看齐。
 
+## 实验⑤：float4 向量化——追到 cuBLAS 88%
+
+[labs/gemm_lab_float4.cu](labs/gemm_lab_float4.cu)，在 reg 基础上三处向量化 + 放大 tile 到 128×128/8×8。
+核心：reg 的瓶颈是访存指令太多（MIO throttle），`float4` 让一条指令搬 4 个 float，访存指令数 ÷4。
+
+| 指标 | reg | **float4** | 变化 |
+|---|---|---|---|
+| TFLOPS | 4.22 | **6.13** | 61%→**88%** cuBLAS |
+| FP32 峰值% | 36% | **53%** | 算力喂得更饱 |
+| L1/TEX 吞吐 | 88% | 82.9% | MIO 减压 |
+| Executed IPC | 1.96 | **2.44** | |
+| Occupancy | 64.8% | **32%** | 寄存器 56→127/线程 |
+
+三处向量化：
+- **(a) global→shared**：`LDG.128` 读 A（4 连续 float），但**转置散写**故只能标量写；B 不转置 → 读写都 float4。
+- **(b) shared→register**：`LDS.128` 读 regM/regN，直接给瓶颈 MIO 管线减压。**靠 (a) 的转置**让一个线程的 8 个 M 值地址连续，才能 float4 读——转置的全部意义在此。
+- **(c) 写回**：`STG.128`。
+
+反直觉再现：**Occupancy 又砍半到 32%（127 寄存器/线程）却更快**。因为 64 个独立累加器提供海量 ILP（不靠多 warp 藏延迟）+ float4 让每条访存指令干 4 倍活。判断始终看 FP32%/TFLOPS，不是 occupancy。
+
+⚠️ 前提：`float4` 要 16B 对齐（`cudaMalloc` 256B 对齐 + N=2048 是 4 倍数 + shared 索引都是 4 倍数才成立）。
+
+离 cuBLAS 最后 12%：double buffering（搬运/计算重叠，消同步气泡）、warp tiling（消 bank conflict）。
+
 ## 参照基准：手写 GEMM 该追谁
 
 两个参照点（同尺寸 N=2048 FP32，本机实测，见 [labs/cublas_ref.cu](labs/cublas_ref.cu)）：
@@ -105,7 +129,8 @@ sudo update-initramfs -u && sudo reboot
 |---|---|---|---|---|
 | naive | 23.9 ms | 0.72 | 10% | 6% |
 | tiled | 18.4 ms | 0.94 | 14% | 8% |
-| **reg (本实验)** | 4.07 ms | **4.22** | **61%** | 36% |
+| reg | 4.07 ms | 4.22 | 61% | 36% |
+| **float4 (本实验最优)** | 2.80 ms | **6.13** | **88%** | 53% |
 | **cuBLAS** ⭐ | 2.47 ms | **6.95** | 100% | ~58% |
 | 硬件 roofline | — | ~12 | — | 100% |
 

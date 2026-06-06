@@ -23,7 +23,7 @@ ai-infra-notes/
 
 | 编号 | 主题 | 状态 | 一句话 |
 |---|---|---|---|
-| [01](topics/01-nsys-profiling/) | Nsight Systems / Compute 性能分析 | ✅ 进行中 | nsys 看时间线定位瓶颈段 + ncu 微观挖 kernel；register blocking 把 GEMM 从 6%→36% FP32 |
+| [01](topics/01-nsys-profiling/) | Nsight Systems / Compute 性能分析 | ✅ 完成 | nsys 定位 + ncu 五步归因；手写 GEMM 从 0.72→6.82 TFLOPS(98% cuBLAS)，含寄存器悬崖/bank conflict/warp tiling 全套踩坑 |
 | [02](topics/02-tensor-core/) | Tensor Core GEMM | 🚧 起步 | 换赛道用 Tensor Core(WMMA/FP16)；naive WMMA 因无 shared 复用反而慢——"用了 ≠ 快" |
 
 ## 学习日志

@@ -31,7 +31,8 @@ ai-infra-notes/
 - **2026-06-04** 搭建本仓库。完成主题 01：nsys 基础——用自写的 `gemm_lab`（naive vs tiled GEMM + launch-bound 演示）过了一遍 nvtx_sum / cuda_gpu_kern_sum / cuda_api_sum 四张表的读法。
 - **2026-06-04** 主题 01 扩展四个实验（见 [topics/01 README](topics/01-nsys-profiling/)）：① pinned 内存让 D2H 带宽 2.9×；② ncu 深挖出 GEMM 只跑 6% FP32 的真因（低算访比 + LG/MIO throttle，**别信 SM Throughput**）；③ GUI 时间线肉眼识别 launch-bound 的"带缝小块"；④ register blocking（每线程 4×4）把 FP32 6%→36%、4.5× 加速，并用 ncu 验证 IPC/occupancy 变化（**拿 occupancy 换 ILP**）。加 cuBLAS 基准做参照：reg 4.22 TFLOPS 已达 cuBLAS(6.95) 的 61%，且 cuBLAS 也只摸到硬件峰值 ~58%——**现实目标是 cuBLAS 不是 roofline**。
 - **2026-06-05** 主题 01 实验⑤：`float4` 向量化（三处 LDG/LDS/STG.128 + tile 放大到 128×128/8×8），把访存指令数 ÷4 给 MIO 管线减压，FP32 36%→53%、6.13 TFLOPS = **cuBLAS 的 88%**。occupancy 又砍半到 32%（127 寄存器/线程）却更快——「occupancy 换 ILP」第二次验证。
-- **2026-06-05** 主题 01 实验⑥（踩坑实录）：两版 double buffering 都比 float4 慢。① 手动寄存器预取：寄存器 127→129 跨过整数阈值，每 SM block 数 2→1，occupancy 腰斩到 16.7%——**寄存器悬崖**。② `cp.async`：根除了悬崖（寄存器→92、occupancy 回 33%）但要求连续不能转置 → regM 退标量 → 访存瓶颈又顶回来。**转置 vs cp.async 不可兼得**。结论：手写 FP32 GEMM 甜点就在 float4(~88%)，再上收益递减，该换 Tensor Core 赛道。
+- **2026-06-05** 主题 01 实验⑥（踩坑实录）：两版 double buffering 都比 float4 慢。① 手动寄存器预取：寄存器 127→129 跨过整数阈值，每 SM block 数 2→1，occupancy 腰斩到 16.7%——**寄存器悬崖**。② `cp.async`：根除了悬崖（寄存器→92、occupancy 回 33%）但要求连续不能转置 → regM 退标量 → 访存瓶颈又顶回来。**转置 vs cp.async 不可兼得**。
+- **2026-06-06** 主题 01 实验⑦（bank conflict 三药方 + 破局）：ncu 查出 float4 主瓶颈是 shared **load 5-way 冲突**。padding/swizzle 只消了 store 冲突(行间型)、load 纹丝不动(+3%)；warp tiling 真消了 load 冲突但 128 累加器→寄存器 232→occupancy 16.7%→更慢。**破局**：wt2 调优版(累加器减半 64、256 线程)同时拿到 无冲突+寄存器 127+occupancy 32% → **6.82 TFLOPS = 98% cuBLAS**。总结：优化是多维度拔河，要把无冲突/寄存器/occupancy 当联立方程一起解——这正是 CUTLASS autotuning 在做的。
 
 ## TODO / 下一步
 

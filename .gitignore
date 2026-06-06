@@ -8,6 +8,7 @@ a.out
 **/labs/gemm_lab*
 **/labs/gemm_bank
 **/labs/gemm_warptile
+**/labs/gemm_wt2
 **/labs/cublas_ref
 **/labs/wmma_gemm
 !**/labs/*.cu

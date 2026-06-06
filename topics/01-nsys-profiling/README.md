@@ -192,10 +192,49 @@ float4 的瓶颈 ncu 查出是 **shared load 5-way bank conflict**（40% wavefro
 
 **教训**：优化要**对症**——本例主瓶颈是第 2 类(warp 内结构 load 冲突)，padding/swizzle 只顺手清了 store(第 1 类)，所以只换来 +3%。**先用 ncu 把冲突分类，再选药方。**
 
+### warp tiling 到底怎么消 bank 冲突（逐格推演）
+
+规则：shared 有 **32 个 bank**，`float 落在第几 bank = 下标 % 32`。一个 warp(32线程)同发一条 shared 读：
+读同一地址=**广播**(免费)；读同 bank 不同地址=**N-way 冲突**(串行 N 拍)。核心问题=**32 个线程分别落哪些 bank**。
+
+**float4 为什么 5-way**：block 排 16×16，`threadCol=tid%16`。一个 warp(tid0~31)沿 N 有 **16 个 threadCol**。
+读 regN `Bs[k*128 + threadCol*8 + j]`，起始列 = threadCol×8：
+
+| threadCol | 读的列 | 落的 bank |
+|---|---|---|
+| 0 | 0-3 | 0,1,2,3 |
+| 4 | 32-35 | **0,1,2,3** ←撞 |
+| 8 | 64-67 | **0,1,2,3** ←撞 |
+| 12 | 96-99 | **0,1,2,3** ←撞 |
+
+跨步 8、每 4 个 threadCol 绕回 bank 0（4×8=32）→ threadCol 0/4/8/12 全挤 bank 0-3 → **4~5 way**。
+根因：**沿 N 16 lane、跨步 8 → mod 32 绕 4 圈、叠 4 层**。
+
+**warp tiling 为什么 0 冲突**：故意把 warp 的 32 lane 排成 **8(N)×4(M)**，沿 N 只用 8 lane(`tColW=lane%8`)。
+读 regN `Bs[... + tColW*4 + j]`，TN=4：
+
+| tColW | 读的列 | 落的 bank |
+|---|---|---|
+| 0 | 0-3 | 0,1,2,3 |
+| 1 | 4-7 | 4,5,6,7 |
+| … | … | … |
+| 7 | 28-31 | 28,29,30,31 |
+
+**8 lane × 4 float = 32，正好铺满 0~31 全部 bank 一遍、一人一格 → 0 冲突**；剩下 4 个 tRowW lane 读同列=广播。
+
+```
+float4 :  16 lane 沿N、跨步8 → 16×8=128, mod32 绕4圈叠4层  → 4~5 way
+warptile:  8 lane 沿N、跨步4 →  8×4=32,  正好铺满32 bank一遍 → 0 冲突
+```
+
+**本质**：warp tiling = **亲手安排 warp 的 32 lane 怎么映射到输出列**，让它们的 shared 访问正好平铺 32 bank，
+而非 naive 那样自然排布撞成团。**代价**：沿 N 只用 8 lane，剩下的列靠 **WNITER**(每线程多算几段列)补 →
+累加器变多→吃寄存器。这就接回了占用率那一维。
+
 ### warp tiling：唯一治好主瓶颈，却踩了占用率坑
-重排"线程→列"映射(一个 warp 32 lane 排 8×4，沿 N 只用 4 lane×TN=16 个连续 float 铺满 16 bank)，
-**真把 5-way load 冲突消了**：excessive wavefront 40%→4%、L1/TEX 83%→46%——证明诊断正确。
-**但** 128 个累加器把寄存器顶到 232(float4 才 127)、又只用 128 线程，occupancy 崩到 16.7% → 净更慢(5.78)。
+重排"线程→列"映射真把 **5-way load 冲突消了**：excessive wavefront 40%→4%、L1/TEX 83%→46%——证明诊断正确。
+**但** 128 个累加器(WNITER=4,TM=8)把寄存器顶到 232(float4 才 127)、又只用 128 线程，occupancy 崩到 16.7% → 净更慢(5.78)。
+→ 解法见下文 wt2：WNITER=2/TM=4 把累加器砍回 64，三维同时压平。
 
 ### 整条优化线最深的一课：优化是多维度拔河
 四次"治好诊断出的病、却被另一维度反噬"：

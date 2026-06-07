@@ -32,3 +32,4 @@ a.out
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+**/labs/vmm_graph

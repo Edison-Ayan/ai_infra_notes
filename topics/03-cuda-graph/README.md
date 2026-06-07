@@ -12,11 +12,13 @@ CUDA Graph 是它的正解：**把一串 kernel "录"成一张图，之后一条
 | [labs/graph_lab.cu](labs/graph_lab.cu) | baseline(逐个 launch) vs graph(录一轮+重放)，20 kernel/轮 × 2000 轮 |
 | [labs/explicit_graph.cu](labs/explicit_graph.cu) | 手动建图(`cudaGraphAddKernelNode`)搭菱形 DAG，体会 graph=节点+依赖边 |
 | [labs/overlap.cu](labs/overlap.cu) | 小 kernel 让独立节点真并发：串行 2T vs graph 并行 1T |
+| [labs/vmm_graph.cu](labs/vmm_graph.cu) | CUDA VMM 保护 graph（torch_memory_saver 机制）：换物理显存、VA 不变、graph 不重捕获仍正确 |
 
 ```bash
 cd labs && ./build.sh && ./graph_lab
 ./build.sh explicit_graph && ./explicit_graph
 ./build.sh overlap && ./overlap
+./build.sh vmm_graph && ./vmm_graph     # 用 driver API，build.sh 自动加 -lcuda
 ```
 
 ## 实验①：CUDA Graph 消除 launch bound
@@ -100,6 +102,36 @@ graph: #7 start=403.22ms ; #8 start=403.22ms  → 起始完全相同 = 同时开
 | 实际重叠 | ❌ 没空位 | ✅ 有空位 → 2× |
 
 **判断 kernel 是否真并发的硬指标**：比 nsys 里两个 kernel 的 `Start` 时间——几乎相同=并发，差一个 duration=串行。
+
+## 实验④：CUDA VMM 保护 graph —— torch_memory_saver 的核心机制
+
+**痛点**：CUDA Graph 在捕获时把每个 kernel 用的**显存指针(虚拟地址)焊死**。普通 `cudaFree/cudaMalloc`
+会让地址变 → graph 失效 → 必须重新捕获(慢，几秒~几十秒)。
+**场景**：推理服务/RLHF 想把空闲的推理引擎几十 GB 显存临时让给训练，但它捕获了大量 CUDA Graph，不想重捕获。
+
+**解法（torch_memory_saver）**：用 CUDA 虚拟内存管理(VMM, `cuMemAddressReserve/cuMemCreate/cuMemMap`)
+把"虚拟地址"和"物理显存"**解耦成两层**：
+```
+虚拟地址 VA (graph 焊死的指针)   ←─ 始终不变 ─→  cuMemAddressReserve 占着
+        │ cuMemMap / cuMemUnmap
+物理显存 (真正占 GB 的)          ←─ 可还可拿 ─→  cuMemCreate / cuMemRelease
+```
+- **pause(让显存)**：`cuMemUnmap`+`cuMemRelease` 还掉物理页，**保留 VA**。
+- **resume**：`cuMemCreate`+`cuMemMap` 把新物理页映射回**同一个 VA**。
+
+VA 全程不变 → graph 焊死的指针仍有效 → **无需重新捕获**。
+
+**[labs/vmm_graph.cu](labs/vmm_graph.cu) 实测**（捕获写 7.0 的 graph → 释放物理显存 → 重建 → 清零 → 重放同一图）：
+```
+VA 0x798129a00000          (从头到尾不变)
+replay#1: p[0]=7.0 ✓
+[释放物理显存→重建→映射回同一 VA]
+memset 清零: p[0]=0.0       ← 证明物理显存确实换了新的一块
+replay#2: p[0]=7.0 ✓        ← 同一张 graph 没重捕获，照样写对！
+```
+> **结论**：物理显存换过一轮(清零证明)，graph 未重捕获仍正确——**VA 不变即可保护 graph**。
+> 这印证了 graph 的本质：把"一串带固定指针的操作"录死，所以**指针稳定性是它的生命线**
+> （也是 `cudaGraphExecUpdate` 改参数、torch_memory_saver 保地址这些工具存在的原因）。
 
 ## 下一步
 

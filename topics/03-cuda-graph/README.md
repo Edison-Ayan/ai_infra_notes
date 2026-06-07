@@ -11,10 +11,12 @@ CUDA Graph 是它的正解：**把一串 kernel "录"成一张图，之后一条
 |---|---|
 | [labs/graph_lab.cu](labs/graph_lab.cu) | baseline(逐个 launch) vs graph(录一轮+重放)，20 kernel/轮 × 2000 轮 |
 | [labs/explicit_graph.cu](labs/explicit_graph.cu) | 手动建图(`cudaGraphAddKernelNode`)搭菱形 DAG，体会 graph=节点+依赖边 |
+| [labs/overlap.cu](labs/overlap.cu) | 小 kernel 让独立节点真并发：串行 2T vs graph 并行 1T |
 
 ```bash
 cd labs && ./build.sh && ./graph_lab
 ./build.sh explicit_graph && ./explicit_graph
+./build.sh overlap && ./overlap
 ```
 
 ## 实验①：CUDA Graph 消除 launch bound
@@ -74,8 +76,32 @@ cudaGraphAddKernelNode(&nB, graph, deps, numDeps, &params);
 2. **nsys 看 graph 的坑**：默认把整张 graph 当**一个节点**记录，`cuda_gpu_kern_sum` 看不到图内 kernel。要加 `--cuda-graph-trace=node` 才拆到单个 kernel。
 3. **capture vs 手动**：90% 用 capture(省事，已有代码包一下)；手动建图主要用于精确表达并行依赖/动态拼图——但理解它才真懂"graph 是 DAG"。
 
+## 实验③：让独立节点真并发——补上"重叠"
+
+实验②里 B、C 标了独立却没重叠(每 kernel 1M 元素占满 24 SM)。这里用"自旋" kernel：
+只发 1 block(占 1 SM)、block 内空转一阵 → 两个独立 kernel 各占 1 SM、GPU 有大把空位 → 同时跑。
+
+| | 时间 | |
+|---|---|---|
+| 单个 spin | 19.8 ms | 基准 T |
+| 串行(一条流跑2次) | 39.7 ms | ≈2T，没重叠 |
+| graph 2 个独立节点 | 19.8 ms | **≈T，2× 重叠** |
+
+**nsys 硬证据**(`cuda_gpu_trace` 的 `Start` 列)：
+```
+串行:  #3 start=343.53ms ; #4 start=363.37ms  → 差 20ms(一个duration) = 串行接力
+graph: #7 start=403.22ms ; #8 start=403.22ms  → 起始完全相同 = 同时开跑 = 重叠
+```
+
+### 结论：graph 独立 + GPU 有空位 = 真并发（缺一不可）
+| | 实验②(1M元素) | 实验③(1 block自旋) |
+|---|---|---|
+| GPU 占用 | 4096 block 占满 24 SM | 每个 1 block 只占 1 SM |
+| 实际重叠 | ❌ 没空位 | ✅ 有空位 → 2× |
+
+**判断 kernel 是否真并发的硬指标**：比 nsys 里两个 kernel 的 `Start` 时间——几乎相同=并发，差一个 duration=串行。
+
 ## 下一步
 
 - [ ] `cudaGraphExecUpdate` 实测：参数变时复用已实例化的图（避免重新 instantiate）
-- [ ] 缩小 kernel 真实看到 B、C 并行重叠
 - [ ] 在真实 GEMM 链/多 stream 上对比；和 topic 01 的 launch-bound 段串起来

@@ -13,6 +13,7 @@ a.out
 **/labs/wmma_gemm
 **/labs/graph_lab
 **/labs/explicit_graph
+**/labs/overlap
 !**/labs/*.cu
 !**/labs/*.sh
 !**/labs/*.md

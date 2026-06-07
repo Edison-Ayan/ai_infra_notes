@@ -12,6 +12,7 @@ a.out
 **/labs/cublas_ref
 **/labs/wmma_gemm
 **/labs/graph_lab
+**/labs/explicit_graph
 !**/labs/*.cu
 !**/labs/*.sh
 !**/labs/*.md

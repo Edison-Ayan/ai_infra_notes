@@ -10,9 +10,11 @@ CUDA Graph 是它的正解：**把一串 kernel "录"成一张图，之后一条
 | 文件 | 内容 |
 |---|---|
 | [labs/graph_lab.cu](labs/graph_lab.cu) | baseline(逐个 launch) vs graph(录一轮+重放)，20 kernel/轮 × 2000 轮 |
+| [labs/explicit_graph.cu](labs/explicit_graph.cu) | 手动建图(`cudaGraphAddKernelNode`)搭菱形 DAG，体会 graph=节点+依赖边 |
 
 ```bash
 cd labs && ./build.sh && ./graph_lab
+./build.sh explicit_graph && ./explicit_graph
 ```
 
 ## 实验①：CUDA Graph 消除 launch bound
@@ -48,8 +50,32 @@ cudaGraphInstantiate(&gexec, graph, ...);    // 编译成可执行图(一次)
 for (iter) cudaGraphLaunch(gexec, s);        // 重放(很多次)
 ```
 
+## 实验②：手动建图——graph 的本质是依赖 DAG
+
+stream capture 录的是"一条线"；手动建图能精确表达 **节点(kernel) + 边(依赖)** 的有向无环图。
+搭一个菱形：A→{B,C}→D，其中 B、C 只依赖 A、彼此无边 → 标记为独立。
+
+核心 API（一个函数表达一个节点+它的依赖）：
+```c
+cudaGraphAddKernelNode(&nB, graph, deps, numDeps, &params);
+//                      存handle 哪张图  依赖谁  几个依赖  跑哪个kernel(cudaKernelNodeParams)
+```
+| 节点 | deps（依赖谁）= DAG 的边 |
+|---|---|
+| A | `nullptr,0`（无依赖，先跑） |
+| B | `{A}` |
+| C | `{A}`（和 B 无边 → 独立） |
+| D | `{B,C}`（等两者） |
+
+实例化+重放和 capture 完全一样（`cudaGraphInstantiate` + `cudaGraphLaunch`）。
+
+### 关键认知
+1. **"独立"≠ 一定并行**：图表达了 B、C 可并行 + D 必须等两者；但**实际重叠需 GPU 有空位**。本 lab 每 kernel 1M 元素=4096 block 占满 24 SM → B、C 照样排队跑。想看真重叠得把 kernel 缩小(留出空闲 SM)。**依赖允许 + 硬件有余量，两条件都满足才重叠。**
+2. **nsys 看 graph 的坑**：默认把整张 graph 当**一个节点**记录，`cuda_gpu_kern_sum` 看不到图内 kernel。要加 `--cuda-graph-trace=node` 才拆到单个 kernel。
+3. **capture vs 手动**：90% 用 capture(省事，已有代码包一下)；手动建图主要用于精确表达并行依赖/动态拼图——但理解它才真懂"graph 是 DAG"。
+
 ## 下一步
 
-- [ ] 显式建图 API（`cudaGraphAddKernelNode` + 依赖边）——比 capture 更细的控制
-- [ ] `cudaGraphExecUpdate` 实测：参数变时复用已实例化的图
+- [ ] `cudaGraphExecUpdate` 实测：参数变时复用已实例化的图（避免重新 instantiate）
+- [ ] 缩小 kernel 真实看到 B、C 并行重叠
 - [ ] 在真实 GEMM 链/多 stream 上对比；和 topic 01 的 launch-bound 段串起来

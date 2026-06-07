@@ -11,6 +11,7 @@ a.out
 **/labs/gemm_wt2
 **/labs/cublas_ref
 **/labs/wmma_gemm
+**/labs/graph_lab
 !**/labs/*.cu
 !**/labs/*.sh
 !**/labs/*.md

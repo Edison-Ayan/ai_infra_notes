@@ -33,3 +33,4 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 **/labs/vmm_graph
+**/labs/decode_batch

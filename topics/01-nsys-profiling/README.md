@@ -12,7 +12,9 @@
 |---|---|
 | [labs/gemm_lab.cu](labs/gemm_lab.cu) | 主实验台：H2D / naive / tiled / launch-bound / D2H 五段，各包 NVTX |
 | [labs/gemm_lab_pinned.cu](labs/gemm_lab_pinned.cu) | 仅把 host 内存换成 `cudaMallocHost`（pinned），对比拷贝带宽 |
-| [labs/gemm_lab_reg.cu](labs/gemm_lab_reg.cu) | 加一档 register-blocked GEMM（每线程 4×4 micro-tile） |
+| [labs/gemm_lab_full.cu](labs/gemm_lab_full.cu) | 完整 FP32 进阶一站式：naive→tiled→**reg([3.5])→float4([3.6])→db([3.7])→cpasync([3.8])**，对应实验④⑤⑥ |
+| [labs/gemm_bank.cu](labs/gemm_bank.cu) / [gemm_warptile.cu](labs/gemm_warptile.cu) / [gemm_wt2.cu](labs/gemm_wt2.cu) | bank conflict 三药方（实验⑦） |
+| [labs/cublas_ref.cu](labs/cublas_ref.cu) | cuBLAS SGEMM 参照基准 |
 
 ```bash
 cd labs && ./build.sh && ./gemm_lab          # 编译+裸跑
@@ -99,7 +101,7 @@ sudo update-initramfs -u && sudo reboot
 
 ## 实验⑤：float4 向量化——追到 cuBLAS 88%
 
-[labs/gemm_lab_float4.cu](labs/gemm_lab_float4.cu)，在 reg 基础上三处向量化 + 放大 tile 到 128×128/8×8。
+[gemm_lab_full.cu](labs/gemm_lab_full.cu) 的 `[3.6]` 段，在 reg 基础上三处向量化 + 放大 tile 到 128×128/8×8。
 核心：reg 的瓶颈是访存指令太多（MIO throttle），`float4` 让一条指令搬 4 个 float，访存指令数 ÷4。
 
 | 指标 | reg | **float4** | 变化 |
@@ -133,7 +135,7 @@ sudo update-initramfs -u && sudo reboot
 | L1/TEX 吞吐 | 82.9% | 72.6% | **92.8%** |
 | 卡在哪 | 均衡 | **寄存器悬崖** | shared 读(标量 regM) |
 
-### 坑①：寄存器悬崖（db 版，[labs/gemm_lab_db.cu](labs/gemm_lab_db.cu)）
+### 坑①：寄存器悬崖（db 版，[gemm_lab_full.cu](labs/gemm_lab_full.cu) 的 `[3.7]` 段）
 手动寄存器预取双缓冲，多用了 2 个预取寄存器(`ldA/ldB`)：127→**129**。
 
 **为什么 2 个寄存器让性能暴跌**：occupancy 是**量子化**的——每 SM 能放几个 block 由 `寄存器总量 ÷ (每线程寄存器×blockSize)` **向下取整**。
@@ -144,7 +146,7 @@ sudo update-initramfs -u && sudo reboot
 
 > **怎么发现的**：优化后变慢 → ncu 看到「寄存器微动 127→129、occupancy 却腰斩」这种**不成比例**变化 → 量子化阈值的指纹 → 算 `65536÷(reg×256)` 的 block 数坐实。
 
-### 坑②：转置 vs cp.async 不可兼得（cpasync 版，[labs/gemm_lab_cpasync.cu](labs/gemm_lab_cpasync.cu)）
+### 坑②：转置 vs cp.async 不可兼得（cpasync 版，[gemm_lab_full.cu](labs/gemm_lab_full.cu) 的 `[3.8]` 段）
 `cp.async` 让 global 直接拷进 shared、绕过寄存器，**确实根除了悬崖**（寄存器 129→92、occupancy 回到 33%）✓。
 但 cp.async 要求两端连续、**不能转置** → As 改非转置 → regM 退回标量读(8×`LDS.32`) → `L1/TEX 82.9%→92.8%`，float4 压下的访存瓶颈又顶回来 ✗。
 

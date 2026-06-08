@@ -1,22 +1,24 @@
 // =============================================================
-// nsys 学习实验台 (gemm_lab)
+// gemm_lab_full —— 完整 FP32 GEMM 进阶一站式（一次跑全程）
 //
-// 目的：用一个程序覆盖 nsys 分析里最常见的几种现象，
-//       配合 NVTX 标记，让时间线一眼能读懂。
-//
-// 程序分 5 个阶段，每段用 NVTX range 包起来：
-//   [1] H2D_copy          —— host→device 数据搬运
-//   [2] naive_gemm        —— 朴素矩阵乘 (访存差)
-//   [3] tiled_gemm        —— shared memory 分块 (访存优化)
-//   [4] launch_bound_demo —— 200 个极小 kernel (演示 launch bound)
-//   [5] D2H_copy          —— device→host 取回结果
-//
-// 编译/运行/profile 见同目录 README 或对话里的步骤。
+// 把 topic 01 整条手写 FP32 优化链放在一个程序里，按 NVTX 阶段递进：
+//   [1] H2D_copy
+//   [2] naive_gemm   —— 朴素 (访存差)            实验②
+//   [3] tiled_gemm   —— shared 分块               实验②
+//   [3.5] reg_gemm   —— register blocking 4×4     实验④
+//   [3.6] float4     —— 向量化 LDG/LDS/STG.128    实验⑤
+//   [3.7] db         —— double buffering(寄存器悬崖) 实验⑥
+//   [3.8] cpasync    —— cp.async 双缓冲(转置取舍)  实验⑥
+//   [4] launch_bound_demo —— 200 个极小 kernel
+//   [5] D2H_copy
+// 每档 kernel 在文件里用 [3.x] 注释分隔，对照 README 各实验看。
+// 注：bank conflict 三药方(pad/swizzle/warptile/wt2)见 gemm_bank/warptile/wt2.cu。
 // =============================================================
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
 #include <cuda_runtime.h>
+#include <cuda_pipeline.h>      // cp.async：__pipeline_memcpy_async / commit / wait_prior
 #include <nvtx3/nvToolsExt.h>   // NVTX：给时间线打标记（header-only，无需链接）
 
 // ---- 错误检查宏 ----
@@ -292,6 +294,88 @@ __global__ void gemm_db(const float* A, const float* B, float* C, int N) {
 }
 
 // =============================================================
+// [3.8] cp.async 双缓冲 GEMM（救活 double buffering）
+//   关键：用 cp.async 让 global 直接拷进 shared、绕过寄存器，
+//   从根上避开 db 版的"寄存器悬崖"——预取不再吃寄存器，occupancy 保住。
+//
+//   ⚠️ 代价/取舍：cp.async 要求 global 和 shared 两端都连续，
+//   没法做转置。所以这里 As 改成自然布局 [BM][BK]（不转置），
+//   导致 regM 读取变成跨步标量(8 条 LDS)——float4 只保住了 regN。
+//   这正是"转置 vs cp.async 不可兼得"的真实工程权衡。
+// =============================================================
+#define BM4 128
+#define BN4 128
+#define BK4 8
+#define TM4 8
+#define TN4 8
+__global__ void gemm_cpasync(const float* A, const float* B, float* C, int N) {
+    const int cRow = blockIdx.y, cCol = blockIdx.x;
+    __shared__ float As[2][BM4 * BK4];   // 自然布局 [BM][BK]（不转置，cp.async 要连续）
+    __shared__ float Bs[2][BK4 * BN4];   // 自然布局 [BK][BN]
+
+    const int tid = threadIdx.x;
+    const int threadCol = tid % (BN4 / TN4);   // 0..15
+    const int threadRow = tid / (BN4 / TN4);   // 0..15
+
+    const float* Abase = A + cRow * BM4 * N;
+    const float* Bbase = B + cCol * BN4;
+    float*       Cp    = C + cRow * BM4 * N + cCol * BN4;
+
+    const int innerRowA = tid / (BK4 / 4), innerColA = tid % (BK4 / 4); // 行0..127, 列0..1
+    const int innerRowB = tid / (BN4 / 4), innerColB = tid % (BN4 / 4); // 行0..7,   列0..31
+
+    float acc[TM4 * TN4] = {0.0f};
+    float regM[TM4], regN[TN4];
+
+    // 发起一片 tile 的 cp.async 拷贝（A、B 各一个 float4=16B），不经寄存器
+    auto load_async = [&](int buf, int koff) {
+        __pipeline_memcpy_async(
+            &As[buf][innerRowA * BK4 + innerColA * 4],
+            &Abase[innerRowA * N + koff + innerColA * 4], 16);
+        __pipeline_memcpy_async(
+            &Bs[buf][innerRowB * BN4 + innerColB * 4],
+            &Bbase[(koff + innerRowB) * N + innerColB * 4], 16);
+        __pipeline_commit();
+    };
+
+    load_async(0, 0);               // 预载 tile0
+    __pipeline_wait_prior(0);       // 等它到位
+    __syncthreads();
+
+    int cur = 0;
+    for (int bk = 0; bk < N; bk += BK4) {
+        int next = bk + BK4;
+        if (next < N) load_async(cur ^ 1, next);   // 后台预取下一片，零寄存器
+
+        for (int k = 0; k < BK4; k++) {
+            // regM：As 自然布局，固定 k 时跨步 BK4 → 只能标量读
+            for (int i = 0; i < TM4; i++)
+                regM[i] = As[cur][(threadRow * TM4 + i) * BK4 + k];
+            // regN：Bs 自然布局，固定 k 时连续 → 仍可 float4
+            for (int j = 0; j < TN4; j += 4)
+                *reinterpret_cast<float4*>(&regN[j]) =
+                    *reinterpret_cast<float4*>(&Bs[cur][k * BN4 + threadCol * TN4 + j]);
+            for (int i = 0; i < TM4; i++)
+                for (int j = 0; j < TN4; j++)
+                    acc[i * TN4 + j] += regM[i] * regN[j];
+        }
+
+        if (next < N) {
+            __pipeline_wait_prior(0);   // 等后台预取完成再换 buffer
+            __syncthreads();
+            cur ^= 1;
+        }
+    }
+    for (int i = 0; i < TM4; i++)
+        for (int j = 0; j < TN4; j += 4) {
+            float4 v;
+            v.x = acc[i * TN4 + j + 0]; v.y = acc[i * TN4 + j + 1];
+            v.z = acc[i * TN4 + j + 2]; v.w = acc[i * TN4 + j + 3];
+            *reinterpret_cast<float4*>(&Cp[(threadRow * TM4 + i) * N + threadCol * TN4 + j]) = v;
+        }
+}
+
+// =============================================================
 // [4] 一个极小的 kernel：只给数组每个元素 +1
 //     单次执行只要几微秒，但 launch 一次有固定的 CPU 开销。
 //     连launch 200 次 => GPU 时间线上全是空隙 = launch bound。
@@ -428,6 +512,23 @@ int main() {
     cudaEventElapsedTime(&ms, t0, t1);
     NVTX_POP();
     printf("[3.7] db     : %8.3f ms | %.2f TFLOPS\n",
+           ms, 2.0 * N * N * N / (ms * 1e-3) / 1e12);
+
+    // =========================================================
+    // [3.8] cp.async 双缓冲 GEMM
+    // =========================================================
+    dim3 grid_ca(N / BN4, N / BM4);
+    gemm_cpasync<<<grid_ca, 256>>>(d_A, d_B, d_C, N);   // 预热
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    NVTX_PUSH("3.8_cpasync_gemm");
+    cudaEventRecord(t0);
+    gemm_cpasync<<<grid_ca, 256>>>(d_A, d_B, d_C, N);
+    cudaEventRecord(t1);
+    CUDA_CHECK(cudaEventSynchronize(t1));
+    cudaEventElapsedTime(&ms, t0, t1);
+    NVTX_POP();
+    printf("[3.8] cpasync: %8.3f ms | %.2f TFLOPS\n",
            ms, 2.0 * N * N * N / (ms * 1e-3) / 1e12);
 
     // =========================================================

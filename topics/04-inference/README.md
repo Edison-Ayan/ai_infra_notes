@@ -17,11 +17,13 @@ Decode(逐 token 生成): 一次只出 1 token → 矩阵×向量 → 访存 bou
 |---|---|
 | [labs/decode_batch.cu](labs/decode_batch.cu) | 一层线性 Y=W@X，batch 1→512，看每 token 耗时随 batch 暴跌 |
 | [labs/kv_cache.cu](labs/kv_cache.cu) | KV cache 显存账(随 batch×seqlen 爆) + 为什么必须存(不存 O(N²)) |
+| [labs/paged_attn.cu](labs/paged_attn.cu) | PagedAttention 模拟：预留连续块 vs 按页分配，利用率 20%→98% |
 
 ```bash
 LIB=$HOME/miniconda3/envs/ai_infra/targets/x86_64-linux/lib
 cd labs && ./build.sh && LD_LIBRARY_PATH=$LIB ./decode_batch
 ./build.sh kv_cache && LD_LIBRARY_PATH=$LIB ./kv_cache
+./build.sh paged_attn && ./paged_attn
 ```
 
 ## 实验①：decode 是访存 bound → batching 几乎白赚吞吐
@@ -72,8 +74,30 @@ decode 每步要对"之前所有 token"做 attention，需它们的 K/V。
 
 **矛盾**：必须存(否则算不动) ↔ 它吃显存限制 batch → **PagedAttention** 来高效管这块显存。
 
+## 实验③：PagedAttention——像 OS 分页一样管 KV cache（vLLM 核心）
+
+传统给每个请求预留一整块"连续"显存、大小按"可能的最大长度"。但请求大多很短 → 大半空着 = 内部碎片。
+PagedAttention：KV cache 切固定小页(16 token)，按需分配、可非连续，只末页有零头。
+
+同 16384 槽显存、同一批请求(平均 347，最大可能 2048)：
+
+| | 传统·预留连续块 | PagedAttention·按页 |
+|---|---|---|
+| 服务请求数 | 8 | **45** |
+| 利用率 | **20.3%** | **97.7%** |
+
+**同显存塞 5.6× 请求**。机制 = OS 虚拟内存分页：每请求一张 **block table(页表)** 把逻辑 token 位置→物理页；代价是 attention kernel 要能从分散页 gather K/V（真正的 PagedAttention kernel）。
+
+**闭合整条推理线**：
+```
+① batching:      batch↑→吞吐↑(decode访存bound)
+② KV cache:      但KV cache吃显存→batch被卡(8GB batch=16爆)
+③ PagedAttention: 利用率20%→98%→同显存塞5.6×请求→batch↑→吞吐↑
+```
+vLLM 论文 ~24× 吞吐，很大一块来自这——利用率上去了，batch 才开得大。
+
 ## 下一步
 
-- [ ] **PagedAttention**：传统每请求预留连续显存→碎片化浪费；分页(非连续小块)把利用率从 ~30%→90%+ → 同显存塞更多请求（vLLM 核心）
-- [ ] continuous batching：请求动态进出怎么拼批
+- [ ] continuous batching：请求动态进出(到达/结束时机不同)怎么实时拼批
 - [ ] KV cache 量化(INT8/FP8)：省显存→更大 batch（接 topic 05）；GQA 减 KV 头数
+- [ ] 真正的 PagedAttention kernel：从非连续页 gather K/V 做 attention

@@ -39,3 +39,4 @@ __pycache__/
 **/labs/calib
 **/labs/awq
 **/labs/kv_cache
+**/labs/paged_attn

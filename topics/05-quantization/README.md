@@ -20,9 +20,11 @@
 | 文件 | 内容 |
 |---|---|
 | [labs/quant_basics.cu](labs/quant_basics.cu) | 对称量化 + 粒度对比：看离群值如何摧毁 per-tensor 低比特 |
+| [labs/quant_gemv.cu](labs/quant_gemv.cu) | W4A16 实测：INT4 权重 GEMV(decode) 的带宽收益，FP16 vs INT4 朴素/优化 |
 
 ```bash
 cd labs && ./build.sh && ./quant_basics
+./build.sh quant_gemv && ./quant_gemv
 ```
 
 ## 实验①：离群值如何摧毁低比特量化（per-tensor vs per-channel/group）
@@ -43,11 +45,29 @@ cd labs && ./build.sh && ./quant_basics
 
 > 连回 topic 04 讨论：激活的离群值比权重更凶，所以 INT4 常"只量化权重、保激活 FP16(W4A16)"。
 
+## 实验②：W4A16 实测——INT4 权重 GEMV 的带宽收益（接 topic 04）
+
+decode = batch=1 的 GEMV `y[N]=W[N×K]@x[K]`，访存 bound。W 量化成 INT4(打包2个/字节)+per-group scale，kernel 在线反量化。N=K=8192：
+
+| | 时间 | 搬权重 | 有效带宽 | |
+|---|---|---|---|---|
+| FP16 | 0.716ms | 134MB | 187GB/s | 喂饱带宽(真HBM上限) |
+| INT4 朴素 | 0.639ms | 33.6MB | 52GB/s | 几乎没赢——反量化开销卡住 |
+| **INT4 优化** | **0.404ms** | 33.6MB | 83GB/s | **1.77× 加速** |
+
+**四层认知**：
+1. **W4A16 确实加速访存 bound 的 decode**：INT4 权重只搬 1/4 字节→提速。接 topic 04(decode 访存 bound，压权重=压瓶颈)。
+2. **朴素 INT4 kernel 把收益丢光**（naive≠fast）：逐字节读+逐元素查 scale/转换的开销盖过"少搬字节"。优化版(向量化读 8 字节 + 每组 scale 取一次)才拉到 1.77×。**这是 Marlin/AWQ 专用 kernel 存在的理由。**
+3. **还没到理论 4×**(83<187 没喂饱)：优化版仍有反量化开销，榨到接近 4× 是生产级 kernel 的活。
+4. **精度代价 11.66% 输出误差**：INT4 round-to-nearest 天然粗；真实 GPTQ/AWQ 用 Hessian 误差补偿压更低——**校准算法是关键，不只是四舍五入**。
+
+> 坑：FP16 在 4096² 测出 304GB/s(超 HBM)是 L2 cache 假象；放大到 134MB 远超 L2 才跌回真实 ~187GB/s。**测带宽当心 cache 假象。**
+
 ## 学习路线
 
 - [x] 量化基础：scale/zero-point、对称/非对称、粒度、离群值（实验①）
+- [x] **W4A16 GPU 实测**：INT4 权重 GEMV 带宽收益 + 朴素 kernel 翻车（实验②）
 - [ ] **Weight-only INT4 (W4A16) vs FP8 (W8A8)**：按瓶颈选型（访存 vs 算力，对应 topic 04 的两区间）
-- [ ] **GPU 上跑量化 GEMM**：INT4 权重反量化 kernel / Marlin，实测 decode 带宽收益（接 topic 04）
 - [ ] **KV cache 量化**：INT8/FP8 KV cache，省显存→更大 batch
 - [ ] **校准 calibration**：怎么定 scale（min-max / 百分位 / GPTQ 的逐列校正）
 - [ ] **FP8 细节**：E4M3/E5M2、per-tensor/block scaling、Transformer Engine

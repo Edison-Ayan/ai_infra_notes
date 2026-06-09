@@ -35,3 +35,4 @@ __pycache__/
 **/labs/vmm_graph
 **/labs/decode_batch
 **/labs/quant_basics
+**/labs/quant_gemv

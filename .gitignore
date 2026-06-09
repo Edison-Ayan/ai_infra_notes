@@ -34,3 +34,4 @@ __pycache__/
 .ipynb_checkpoints/
 **/labs/vmm_graph
 **/labs/decode_batch
+**/labs/quant_basics

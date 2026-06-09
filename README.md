@@ -27,6 +27,7 @@ ai-infra-notes/
 | [02](topics/02-tensor-core/) | Tensor Core GEMM | 🚧 起步(暂搁) | 换赛道用 Tensor Core(WMMA/FP16)；naive WMMA 因无 shared 复用反而慢——"用了 ≠ 快" |
 | [03](topics/03-cuda-graph/) | CUDA Graph | ✅ 进行中 | launch bound 的正解：录一串 kernel 成图、一条 cudaGraphLaunch 重放，CPU launch 调用 ÷20 → 1.78× |
 | [04](topics/04-inference/) | 推理系统内部 | 🚧 起步 | decode 是访存 bound → batching 几乎白赚吞吐(12→1150 token/ms ≈93×)；引出 PagedAttention/KV cache |
+| [05](topics/05-quantization/) | 量化 | 🚧 起步 | scale+粒度基础；离群值摧毁 per-tensor 低比特(正常通道误差100%)→per-channel/group 救回(GPTQ/AWQ)；W4A16 vs FP8 按瓶颈选型 |
 
 ## 学习日志
 

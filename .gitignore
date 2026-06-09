@@ -36,3 +36,4 @@ __pycache__/
 **/labs/decode_batch
 **/labs/quant_basics
 **/labs/quant_gemv
+**/labs/calib

@@ -21,10 +21,12 @@
 |---|---|
 | [labs/quant_basics.cu](labs/quant_basics.cu) | 对称量化 + 粒度对比：看离群值如何摧毁 per-tensor 低比特 |
 | [labs/quant_gemv.cu](labs/quant_gemv.cu) | W4A16 实测：INT4 权重 GEMV(decode) 的带宽收益，FP16 vs INT4 朴素/优化 |
+| [labs/calib.cu](labs/calib.cu) | 校准：Clip(最优裁剪) vs RTN，把 INT4 误差压下去 |
 
 ```bash
 cd labs && ./build.sh && ./quant_basics
 ./build.sh quant_gemv && ./quant_gemv
+./build.sh calib && ./calib
 ```
 
 ## 实验①：离群值如何摧毁低比特量化（per-tensor vs per-channel/group）
@@ -63,10 +65,34 @@ decode = batch=1 的 GEMV `y[N]=W[N×K]@x[K]`，访存 bound。W 量化成 INT4(
 
 > 坑：FP16 在 4096² 测出 304GB/s(超 HBM)是 L2 cache 假象；放大到 134MB 远超 L2 才跌回真实 ~187GB/s。**测带宽当心 cache 假象。**
 
+## 实验③：校准——把 INT4 误差从 RTN 压下去
+
+RTN(`scale=maxabs/7`)的死穴：1 个离群值绑架 scale，正常权重只用到很少量化级。
+Clip 校准：故意把 scale 取小(裁掉离群值、让它们饱和)，换正常权重更细分辨率。per-group INT4，权重含 1% 离群值(×6)：
+
+| 方法 | 重建误差 | 输出误差(Wx) |
+|---|---|---|
+| RTN (maxabs/7) | 22.40% | 23.37% |
+| **Clip 校准** | 19.28% | **18.62%** |
+
+最优 clip 比例平均 **0.81**(scale 取到 maxabs 的 81%)。**核心是偏差-方差权衡**：牺牲少数离群值的精度(饱和)，换多数正常权重铺开到更多级 → 总误差净降。
+
+**校准本质 = 花点离线计算选最优量化参数，而非无脑 maxabs。** 生产级更狠：
+
+| 方法 | 思路 |
+|---|---|
+| Clip/百分位(本课) | 选最优裁剪点，只看权重 |
+| **GPTQ** | 逐列量化，用校准数据 Hessian 把误差补偿到未量化列，最小化 ‖WX−WqX‖ |
+| **AWQ** | 激活感知：放大"被大激活乘的重要权重"再量化，保护它们 |
+| **SmoothQuant** | 把量化难度从激活迁移到权重(为 W8A8) |
+
+共同点：用少量校准数据(几百样本)统计激活/误差，更聪明地处理离群值(裁剪/补偿/迁移/保护)。
+
 ## 学习路线
 
 - [x] 量化基础：scale/zero-point、对称/非对称、粒度、离群值（实验①）
 - [x] **W4A16 GPU 实测**：INT4 权重 GEMV 带宽收益 + 朴素 kernel 翻车（实验②）
+- [x] **校准**：Clip 最优裁剪 vs RTN，误差压下去；GPTQ/AWQ 思路（实验③）
 - [ ] **Weight-only INT4 (W4A16) vs FP8 (W8A8)**：按瓶颈选型（访存 vs 算力，对应 topic 04 的两区间）
 - [ ] **KV cache 量化**：INT8/FP8 KV cache，省显存→更大 batch
 - [ ] **校准 calibration**：怎么定 scale（min-max / 百分位 / GPTQ 的逐列校正）

@@ -37,3 +37,4 @@ __pycache__/
 **/labs/quant_basics
 **/labs/quant_gemv
 **/labs/calib
+**/labs/awq

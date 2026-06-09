@@ -22,11 +22,13 @@
 | [labs/quant_basics.cu](labs/quant_basics.cu) | 对称量化 + 粒度对比：看离群值如何摧毁 per-tensor 低比特 |
 | [labs/quant_gemv.cu](labs/quant_gemv.cu) | W4A16 实测：INT4 权重 GEMV(decode) 的带宽收益，FP16 vs INT4 朴素/优化 |
 | [labs/calib.cu](labs/calib.cu) | 校准：Clip(最优裁剪) vs RTN，把 INT4 误差压下去 |
+| [labs/awq.cu](labs/awq.cu) | 简化 AWQ：用激活信息保护重要权重通道，α 搜索见"保护 vs 撑爆"甜点 |
 
 ```bash
 cd labs && ./build.sh && ./quant_basics
 ./build.sh quant_gemv && ./quant_gemv
 ./build.sh calib && ./calib
+./build.sh awq && ./awq
 ```
 
 ## 实验①：离群值如何摧毁低比特量化（per-tensor vs per-channel/group）
@@ -88,11 +90,33 @@ Clip 校准：故意把 scale 取小(裁掉离群值、让它们饱和)，换正
 
 共同点：用少量校准数据(几百样本)统计激活/误差，更聪明地处理离群值(裁剪/补偿/迁移/保护)。
 
+## 实验④：简化 AWQ——用激活信息保护重要权重
+
+恒等式 `Wx = (W·diag(s))·(diag(1/s)·x)`：量化放大后的 `W·diag(s)`，对重要通道(大激活)取 `s_k=(a_k)^α>1`，
+其权重占更多量化级→相对误差↓(被保护)；激活那边除回去吸收。场景：每 16 通道 1 个激活离群(×10)。
+
+| 方法 | 测试集输出误差 |
+|---|---|
+| RTN | 11.60% |
+| Clip | 9.96% |
+| **AWQ(激活感知)** | **8.90%** (α=0.2) |
+
+**α 搜索曲线是原理实证(U 形甜点)**：
+```
+α=0.0(=RTN不保护) 11.57% → α=0.2(甜点) 8.81% → α=1.0(过头) 25.73%(比RTN还烂)
+```
+- α 小：适度放大重要通道→保护→误差降；
+- α 大：放太狠→重要通道撑爆同组 group scale→连累全组→误差反升。
+- 甜点 α≈0.2：保护够又没撑爆。**这就是"保护 vs 撑爆"的权衡拐点。**
+
+> AWQ vs Clip：Clip 只看权重裁离群；AWQ 看激活保护重要通道——**关键升级是用了激活信息**(GPTQ 同款核心，但不用 Hessian)。两者正交，实战常叠加。校准 = 花离线计算最小化"输出误差"而非"权重误差"。
+
 ## 学习路线
 
 - [x] 量化基础：scale/zero-point、对称/非对称、粒度、离群值（实验①）
 - [x] **W4A16 GPU 实测**：INT4 权重 GEMV 带宽收益 + 朴素 kernel 翻车（实验②）
-- [x] **校准**：Clip 最优裁剪 vs RTN，误差压下去；GPTQ/AWQ 思路（实验③）
+- [x] **校准 Clip**：最优裁剪 vs RTN，误差压下去（实验③）
+- [x] **校准 AWQ**：激活感知保护重要权重，α 甜点（实验④）
 - [ ] **Weight-only INT4 (W4A16) vs FP8 (W8A8)**：按瓶颈选型（访存 vs 算力，对应 topic 04 的两区间）
 - [ ] **KV cache 量化**：INT8/FP8 KV cache，省显存→更大 batch
 - [ ] **校准 calibration**：怎么定 scale（min-max / 百分位 / GPTQ 的逐列校正）

@@ -40,3 +40,4 @@ __pycache__/
 **/labs/awq
 **/labs/kv_cache
 **/labs/paged_attn
+**/labs/flash

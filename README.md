@@ -29,6 +29,7 @@ ai-infra-notes/
 | [04](topics/04-inference/) | 推理系统内部 | 🚧 起步 | decode 是访存 bound → batching 几乎白赚吞吐(12→1150 token/ms ≈93×)；引出 PagedAttention/KV cache |
 | [05](topics/05-quantization/) | 量化 | 🚧 起步 | scale+粒度基础；离群值摧毁 per-tensor 低比特(正常通道误差100%)→per-channel/group 救回(GPTQ/AWQ)；W4A16 vs FP8 按瓶颈选型 |
 | [06](topics/06-flash-attention/) | FlashAttention | 🚧 起步 | online softmax 永不物化 N×N → 显存 O(N²)→O(N)；速度靠 IO-aware tiling+tensor core |
+| [07](topics/07-triton/) | Triton 入门（AI 编译器第一站） | 🚧 进行中 | 手写 GEMM 调度层的自动化：tile 我定，shared/向量化/流水/swizzle/tensor core 编译器包；几十行略胜 cuBLAS(FP32 110%/FP16 105%)，PTX 里自动发出我手抠的 cp.async+mma.sync |
 
 ## 学习日志
 
@@ -39,6 +40,8 @@ ai-infra-notes/
 - **2026-06-09** 主题 04 推理系统起步：核心是"prefill 算力 bound / decode 访存 bound"。实测一层线性 W=4096²FP16，batch 1→512：访存 bound 区(B≤32)batch 涨 32× 总耗时几乎不动→每 token 暴跌、batching 几乎白赚；算力 bound 区(B≥128)耗时随 batch 线性增长。吞吐 12→1150 token/ms≈93×——这是 continuous batching 的根。下一步 PagedAttention(batch 受 KV cache 显存限制)。
 - **2026-06-07** 主题 03 CUDA Graph：承接 topic 01 launch bound。20 kernel/轮 × 2000 轮，baseline 逐个 `cudaLaunchKernel`(40000 次) vs graph 录一轮重放(`cudaGraphLaunch` 2000 次)。nsys 证实 CPU launch 调用 ÷20、1.78× 加速。要点：录制+instantiate 有成本，只对"固定 kernel 链×大量重复"且 launch bound 才划算。（tensor core topic 02 暂搁）
 - **2026-06-06** 主题 01 实验⑦（bank conflict 三药方 + 破局）：ncu 查出 float4 主瓶颈是 shared **load 5-way 冲突**。padding/swizzle 只消了 store 冲突(行间型)、load 纹丝不动(+3%)；warp tiling 真消了 load 冲突但 128 累加器→寄存器 232→occupancy 16.7%→更慢。**破局**：wt2 调优版(累加器减半 64、256 线程)同时拿到 无冲突+寄存器 127+occupancy 32% → **6.82 TFLOPS = 98% cuBLAS**。总结：优化是多维度拔河，要把无冲突/寄存器/occupancy 当联立方程一起解——这正是 CUTLASS autotuning 在做的。
+
+- **2026-06-24** 主题 07 Triton 起步（入门 AI 编译器第一站）：拿 Triton GEMM 对线 topic 01 手写版。**心智模型**=编译器三层 lowering(图→Tensor IR→硬件)，我精通的「手调 GEMM」正是中间调度层，Triton 把它自动化。**对照收获**：tile 还我定，但 shared/`__syncthreads`/`float4`向量化/`cp.async`双缓冲/bank-conflict swizzle/tensor core 选择全交编译器；`num_stages`=我手抠的 double buffer，`@autotune`=我手解的联立方程(即 CUTLASS autotuning)。**结果**：4096³ 上 Triton 略胜手写 cuBLAS——FP32(TF32) 12.90 vs 11.74 TFLOPS=110%、FP16 25.44 vs 24.11=105%，代码量 ÷一个数量级。**踩坑**：FP32 初看「202% 假赢」是 `tl.dot` 默认偷走 TF32 而 torch 跑真 FP32，`max_err≈0.30` 是 TF32 指纹——**对线必先对齐精度**。**最大冲击**：`DUMP=1` 落 ttir/ttgir/ptx，生成的 PTX 里直接 grep 到 `cp.async.cg.shared.global`+`mma.sync`(111 处)——我 topic 01 手写还撞寄存器悬崖的 cp.async、topic 02 还没喂饱的 tensor core，编译器一行 `tl.load`+`tl.dot` 全自动发了。下一步：实验③ Triton 融合 `matmul+bias+GELU` 引出图级融合 → topic 08 torch.compile/TorchInductor。
 
 ## TODO / 下一步
 

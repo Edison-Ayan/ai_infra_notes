@@ -41,3 +41,5 @@ __pycache__/
 **/labs/kv_cache
 **/labs/paged_attn
 **/labs/flash
+# topic 07 Triton dump 产物（本地重跑 DUMP=1 ./run.sh 生成）
+**/labs/dump.*

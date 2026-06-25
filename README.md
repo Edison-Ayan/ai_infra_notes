@@ -29,7 +29,7 @@ ai-infra-notes/
 | [04](topics/04-inference/) | 推理系统内部 | 🚧 起步 | decode 是访存 bound → batching 几乎白赚吞吐(12→1150 token/ms ≈93×)；引出 PagedAttention/KV cache |
 | [05](topics/05-quantization/) | 量化 | 🚧 起步 | scale+粒度基础；离群值摧毁 per-tensor 低比特(正常通道误差100%)→per-channel/group 救回(GPTQ/AWQ)；W4A16 vs FP8 按瓶颈选型 |
 | [06](topics/06-flash-attention/) | FlashAttention | 🚧 起步 | online softmax 永不物化 N×N → 显存 O(N²)→O(N)；速度靠 IO-aware tiling+tensor core |
-| [07](topics/07-triton/) | Triton 入门（AI 编译器第一站） | 🚧 进行中 | 手写 GEMM 调度层的自动化：tile 我定，shared/向量化/流水/swizzle/tensor core 编译器包；几十行略胜 cuBLAS(FP32 110%/FP16 105%)，PTX 里自动发出我手抠的 cp.async+mma.sync |
+| [07](topics/07-triton/) | Triton 入门（AI 编译器第一站） | 🚧 进行中 | 手写 GEMM 调度层的自动化：tile 我定，shared/向量化/流水/swizzle/tensor core 编译器包；几十行略胜 cuBLAS(FP32 110%/FP16 105%)，PTX 里自动发出我手抠的 cp.async+mma.sync；融合 matmul+bias+GELU 一个 kernel，越访存 bound 越赚(1.17×→2.28×) |
 
 ## 学习日志
 
@@ -42,6 +42,8 @@ ai-infra-notes/
 - **2026-06-06** 主题 01 实验⑦（bank conflict 三药方 + 破局）：ncu 查出 float4 主瓶颈是 shared **load 5-way 冲突**。padding/swizzle 只消了 store 冲突(行间型)、load 纹丝不动(+3%)；warp tiling 真消了 load 冲突但 128 累加器→寄存器 232→occupancy 16.7%→更慢。**破局**：wt2 调优版(累加器减半 64、256 线程)同时拿到 无冲突+寄存器 127+occupancy 32% → **6.82 TFLOPS = 98% cuBLAS**。总结：优化是多维度拔河，要把无冲突/寄存器/occupancy 当联立方程一起解——这正是 CUTLASS autotuning 在做的。
 
 - **2026-06-24** 主题 07 Triton 起步（入门 AI 编译器第一站）：拿 Triton GEMM 对线 topic 01 手写版。**心智模型**=编译器三层 lowering(图→Tensor IR→硬件)，我精通的「手调 GEMM」正是中间调度层，Triton 把它自动化。**对照收获**：tile 还我定，但 shared/`__syncthreads`/`float4`向量化/`cp.async`双缓冲/bank-conflict swizzle/tensor core 选择全交编译器；`num_stages`=我手抠的 double buffer，`@autotune`=我手解的联立方程(即 CUTLASS autotuning)。**结果**：4096³ 上 Triton 略胜手写 cuBLAS——FP32(TF32) 12.90 vs 11.74 TFLOPS=110%、FP16 25.44 vs 24.11=105%，代码量 ÷一个数量级。**踩坑**：FP32 初看「202% 假赢」是 `tl.dot` 默认偷走 TF32 而 torch 跑真 FP32，`max_err≈0.30` 是 TF32 指纹——**对线必先对齐精度**。**最大冲击**：`DUMP=1` 落 ttir/ttgir/ptx，生成的 PTX 里直接 grep 到 `cp.async.cg.shared.global`+`mma.sync`(111 处)——我 topic 01 手写还撞寄存器悬崖的 cp.async、topic 02 还没喂饱的 tensor core，编译器一行 `tl.load`+`tl.dot` 全自动发了。下一步：实验③ Triton 融合 `matmul+bias+GELU` 引出图级融合 → topic 08 torch.compile/TorchInductor。
+
+- **2026-06-25** 主题 07 实验③（算子融合，第一次碰 kernel **之间**的优化——手写 CUDA 笔记没有的维度）：Triton 把 `matmul+bias+GELU` 融成一个 kernel(累加器还在寄存器里就地做 epilogue、只写一次 M×N)，对比 torch 三独立 kernel(中间结果 2 读 2 写往返 HBM)。**核心 insight**：融合省的访存固定(M×N=0.13GB)，但 matmul 越不算力 bound 占比越大 → 越赚。实测 FP16 同样 0.13GB，K=4096(算力 bound) 1.17× → K=1024 1.40× → K=256(访存倾斜) **2.28×**。推论：decode/推理那种瘦 matmul+一堆 elementwise，融合是大杠杆——正是 torch.compile 默认猛融的原因。踩坑：`tl.math` 无 `tanh`，改用 `tl.math.erf` 走精确 GELU 对齐 torch 默认 `F.gelu`。下一步 topic 08 torch.compile/TorchInductor 看「图」层怎么自动生成 Triton+融合。
 
 ## TODO / 下一步
 

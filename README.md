@@ -30,6 +30,7 @@ ai-infra-notes/
 | [05](topics/05-quantization/) | 量化 | 🚧 起步 | scale+粒度基础；离群值摧毁 per-tensor 低比特(正常通道误差100%)→per-channel/group 救回(GPTQ/AWQ)；W4A16 vs FP8 按瓶颈选型 |
 | [06](topics/06-flash-attention/) | FlashAttention | 🚧 起步 | online softmax 永不物化 N×N → 显存 O(N²)→O(N)；速度靠 IO-aware tiling+tensor core |
 | [07](topics/07-triton/) | Triton 入门（AI 编译器第一站） | 🚧 进行中 | 手写 GEMM 调度层的自动化：tile 我定，shared/向量化/流水/swizzle/tensor core 编译器包；几十行略胜 cuBLAS(FP32 110%/FP16 105%)，PTX 里自动发出我手抠的 cp.async+mma.sync；融合 matmul+bias+GELU 一个 kernel，越访存 bound 越赚(1.17×→2.28×) |
+| [08](topics/08-torch-compile/) | torch.compile / TorchInductor（图层） | 🚧 进行中 | 图层自动化闭环：Dynamo 捕图→Inductor 自动融合→生成 Triton；pointwise 链 10 kernel→1、11.97×，FFN 算力 bound 1.05×；生成的 `triton_poi_fused_addmm_gelu` 正是 topic07 手写的融合 kernel |
 
 ## 学习日志
 
@@ -44,6 +45,8 @@ ai-infra-notes/
 - **2026-06-24** 主题 07 Triton 起步（入门 AI 编译器第一站）：拿 Triton GEMM 对线 topic 01 手写版。**心智模型**=编译器三层 lowering(图→Tensor IR→硬件)，我精通的「手调 GEMM」正是中间调度层，Triton 把它自动化。**对照收获**：tile 还我定，但 shared/`__syncthreads`/`float4`向量化/`cp.async`双缓冲/bank-conflict swizzle/tensor core 选择全交编译器；`num_stages`=我手抠的 double buffer，`@autotune`=我手解的联立方程(即 CUTLASS autotuning)。**结果**：4096³ 上 Triton 略胜手写 cuBLAS——FP32(TF32) 12.90 vs 11.74 TFLOPS=110%、FP16 25.44 vs 24.11=105%，代码量 ÷一个数量级。**踩坑**：FP32 初看「202% 假赢」是 `tl.dot` 默认偷走 TF32 而 torch 跑真 FP32，`max_err≈0.30` 是 TF32 指纹——**对线必先对齐精度**。**最大冲击**：`DUMP=1` 落 ttir/ttgir/ptx，生成的 PTX 里直接 grep 到 `cp.async.cg.shared.global`+`mma.sync`(111 处)——我 topic 01 手写还撞寄存器悬崖的 cp.async、topic 02 还没喂饱的 tensor core，编译器一行 `tl.load`+`tl.dot` 全自动发了。下一步：实验③ Triton 融合 `matmul+bias+GELU` 引出图级融合 → topic 08 torch.compile/TorchInductor。
 
 - **2026-06-25** 主题 07 实验③（算子融合，第一次碰 kernel **之间**的优化——手写 CUDA 笔记没有的维度）：Triton 把 `matmul+bias+GELU` 融成一个 kernel(累加器还在寄存器里就地做 epilogue、只写一次 M×N)，对比 torch 三独立 kernel(中间结果 2 读 2 写往返 HBM)。**核心 insight**：融合省的访存固定(M×N=0.13GB)，但 matmul 越不算力 bound 占比越大 → 越赚。实测 FP16 同样 0.13GB，K=4096(算力 bound) 1.17× → K=1024 1.40× → K=256(访存倾斜) **2.28×**。推论：decode/推理那种瘦 matmul+一堆 elementwise，融合是大杠杆——正是 torch.compile 默认猛融的原因。踩坑：`tl.math` 无 `tanh`，改用 `tl.math.erf` 走精确 GELU 对齐 torch 默认 `F.gelu`。下一步 topic 08 torch.compile/TorchInductor 看「图」层怎么自动生成 Triton+融合。
+
+- **2026-06-26** 主题 08 torch.compile/TorchInductor（图层自动化，闭环 topic 07 手写融合）：给 eager 模型，torch.compile 自己 Dynamo 捕图→Inductor 自动决定怎么融→生成 Triton(复用 topic 07 那层 lowering)。**实测**：① pointwise 链(8 个 elementwise) eager 10 kernel/14ms → compiled **1 kernel/1.17ms = 11.97×**(中间结果全留寄存器不往返 HBM)；② FFN(两大 matmul 算力 bound) 5→5 kernel、仅 1.05×——和 topic 07 lab② 同一课:**融合省访存，越访存 bound 越赚**。**闭环冲击**：`./run.sh compile dump` 看生成的 kernel 名字本身就是证据——`triton_poi_fused_add_clamp_exp_mul_relu_sigmoid_sub_tanh_0`(8 个 op 全列名字里塌一个 kernel)、`triton_poi_fused_addmm_gelu_0`(GELU 融进 matmul epilogue = **我 topic07 lab② 手写的 matmul+bias+GELU**)。三层闭环走通:图层(自动融合)→调度层(topic07 Triton)→硬件层(topic01 PTX)。下一步:graph_breaks 看 Dynamo 边界、max-autotune 用 Inductor Triton 模板替 cuBLAS。
 
 ## TODO / 下一步
 

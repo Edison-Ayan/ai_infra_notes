@@ -43,3 +43,6 @@ __pycache__/
 **/labs/flash
 # topic 07 Triton dump 产物（本地重跑 DUMP=1 ./run.sh 生成）
 **/labs/dump.*
+# topic 08 Inductor 生成产物（本地重跑 ./run.sh compile dump 生成）
+**/labs/inductor_output.log
+**/torch_compile_debug/

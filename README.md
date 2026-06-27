@@ -30,7 +30,8 @@ ai-infra-notes/
 | [05](topics/05-quantization/) | 量化 | 🚧 起步 | scale+粒度基础；离群值摧毁 per-tensor 低比特(正常通道误差100%)→per-channel/group 救回(GPTQ/AWQ)；W4A16 vs FP8 按瓶颈选型 |
 | [06](topics/06-flash-attention/) | FlashAttention | 🚧 起步 | online softmax 永不物化 N×N → 显存 O(N²)→O(N)；速度靠 IO-aware tiling+tensor core |
 | [07](topics/07-triton/) | Triton 入门（AI 编译器第一站） | 🚧 进行中 | 手写 GEMM 调度层的自动化：tile 我定，shared/向量化/流水/swizzle/tensor core 编译器包；几十行略胜 cuBLAS(FP32 110%/FP16 105%)，PTX 里自动发出我手抠的 cp.async+mma.sync；融合 matmul+bias+GELU 一个 kernel，越访存 bound 越赚(1.17×→2.28×) |
-| [08](topics/08-torch-compile/) | torch.compile / TorchInductor（图层） | 🚧 进行中 | 图层自动化闭环：Dynamo 捕图→Inductor 自动融合→生成 Triton；pointwise 链 10 kernel→1、11.97×，FFN 算力 bound 1.05×；生成的 `triton_poi_fused_addmm_gelu` 正是 topic07 手写的融合 kernel |
+| [08](topics/08-torch-compile/) | torch.compile / TorchInductor（图层） | 🚧 进行中 | 图层自动化闭环：Dynamo 捕图→Inductor 自动融合→生成 Triton；pointwise 链 10 kernel→1、11.97×，FFN 算力 bound 1.05×；生成的 `triton_poi_fused_addmm_gelu` 正是 topic07 手写的融合 kernel；进阶 max-autotune(小卡退回 cuBLAS) + graph break |
+| [09](topics/09-compiler-principles/) | AI 编译器原理（算法/调度分离 + lowering） | 🚧 进行中 | 两块地基：① 同一 matmul 算法只换调度差 4.7×(Halide 算法与调度分离)；② 渐进式 lowering——tt.dot 经 ttgir(#mma/#shared) 降到 ptx(64 mma.sync+33 cp.async)，每层 dialect 降一个台阶 |
 
 ## 学习日志
 
@@ -49,6 +50,8 @@ ai-infra-notes/
 - **2026-06-26** 主题 08 torch.compile/TorchInductor（图层自动化，闭环 topic 07 手写融合）：给 eager 模型，torch.compile 自己 Dynamo 捕图→Inductor 自动决定怎么融→生成 Triton(复用 topic 07 那层 lowering)。**实测**：① pointwise 链(8 个 elementwise) eager 10 kernel/14ms → compiled **1 kernel/1.17ms = 11.97×**(中间结果全留寄存器不往返 HBM)；② FFN(两大 matmul 算力 bound) 5→5 kernel、仅 1.05×——和 topic 07 lab② 同一课:**融合省访存，越访存 bound 越赚**。**闭环冲击**：`./run.sh compile dump` 看生成的 kernel 名字本身就是证据——`triton_poi_fused_add_clamp_exp_mul_relu_sigmoid_sub_tanh_0`(8 个 op 全列名字里塌一个 kernel)、`triton_poi_fused_addmm_gelu_0`(GELU 融进 matmul epilogue = **我 topic07 lab② 手写的 matmul+bias+GELU**)。三层闭环走通:图层(自动融合)→调度层(topic07 Triton)→硬件层(topic01 PTX)。下一步:graph_breaks 看 Dynamo 边界、max-autotune 用 Inductor Triton 模板替 cuBLAS。
 
 - **2026-06-26** 主题 08 进阶(深入 Inductor)：① **max-autotune**=把 topic07 的 `@autotune` 搬到图层，让 Inductor 用自己的 Triton matmul 模板当场搜 config 替 cuBLAS。4096³ 实测 eager/默认 24.5 TFLOPS、max-autotune 反降到 22——日志 `Not enough SMs to use max_autotune_gemm`：**4060 只 24 个 SM 低于门槛，编译器主动拒用 Triton 模板退回 cuBLAS**，那 22 是绕一圈的开销。法则:**模板/调度选择看硬件**，小卡 cuBLAS 已最优、编译器不硬碰(A100/H100 才会真用模板)。② **graph break**:`dynamo.explain` 看 data-dependent 控制流断图——纯张量算子 0 断点/1 段，`if x.sum()>0` 值依赖分支 1 断点/2 段。法则:forward 别用依赖张量值的 python 分支(改 `torch.where`/mask)，断图碎掉融合。
+
+- **2026-06-26** 主题 09 AI 编译器原理(从"会用"到"懂原理")：两块所有 AI 编译器(Halide/TVM/MLIR/Triton/XLA)共享的地基，各用一个 Triton demo 坐实。① **算法与调度分离**:同一个 `matmul_kernel`(算法一字不改)手喂 4 组调度(只改 BLOCK/warps/stages)，4096³ FP16 从 16³tile 的 5.17 TFLOPS 到 128²tile 的 24.43——**最好/最差差 4.7×，性能全在调度里**。这正是编译器的价值:算法谁都会写(C=A@B)，难的是搜调度空间；topic01 我人肉搜、@autotune 自动搜。② **渐进式 lowering**:编译一个 GEMM dump 每层 IR——`tt.dot`(ttir 算法层 1 个)→ ttgir 调度层绑 `#mma`(25)/`#shared`(100) 布局 → ptx 机器层摊成 64 条 `mma.sync`+33 条 `cp.async`。每层 dialect 只降一个抽象台阶(MLIR 多层 IR 方法论)。串起来:算法→(分离/搜调度)→调度→(渐进 lowering)→机器码，topic01 在底层人肉干、07/08 看自动干、09 看清凭什么能自动干。下一步:MLIR dialect 体系、TVM TE 手写 compute+schedule。
 
 ## TODO / 下一步
 

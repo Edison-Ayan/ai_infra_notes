@@ -48,6 +48,8 @@ ai-infra-notes/
 
 - **2026-06-26** 主题 08 torch.compile/TorchInductor（图层自动化，闭环 topic 07 手写融合）：给 eager 模型，torch.compile 自己 Dynamo 捕图→Inductor 自动决定怎么融→生成 Triton(复用 topic 07 那层 lowering)。**实测**：① pointwise 链(8 个 elementwise) eager 10 kernel/14ms → compiled **1 kernel/1.17ms = 11.97×**(中间结果全留寄存器不往返 HBM)；② FFN(两大 matmul 算力 bound) 5→5 kernel、仅 1.05×——和 topic 07 lab② 同一课:**融合省访存，越访存 bound 越赚**。**闭环冲击**：`./run.sh compile dump` 看生成的 kernel 名字本身就是证据——`triton_poi_fused_add_clamp_exp_mul_relu_sigmoid_sub_tanh_0`(8 个 op 全列名字里塌一个 kernel)、`triton_poi_fused_addmm_gelu_0`(GELU 融进 matmul epilogue = **我 topic07 lab② 手写的 matmul+bias+GELU**)。三层闭环走通:图层(自动融合)→调度层(topic07 Triton)→硬件层(topic01 PTX)。下一步:graph_breaks 看 Dynamo 边界、max-autotune 用 Inductor Triton 模板替 cuBLAS。
 
+- **2026-06-26** 主题 08 进阶(深入 Inductor)：① **max-autotune**=把 topic07 的 `@autotune` 搬到图层，让 Inductor 用自己的 Triton matmul 模板当场搜 config 替 cuBLAS。4096³ 实测 eager/默认 24.5 TFLOPS、max-autotune 反降到 22——日志 `Not enough SMs to use max_autotune_gemm`：**4060 只 24 个 SM 低于门槛，编译器主动拒用 Triton 模板退回 cuBLAS**，那 22 是绕一圈的开销。法则:**模板/调度选择看硬件**，小卡 cuBLAS 已最优、编译器不硬碰(A100/H100 才会真用模板)。② **graph break**:`dynamo.explain` 看 data-dependent 控制流断图——纯张量算子 0 断点/1 段，`if x.sum()>0` 值依赖分支 1 断点/2 段。法则:forward 别用依赖张量值的 python 分支(改 `torch.where`/mask)，断图碎掉融合。
+
 ## TODO / 下一步
 
 - [x] 主题 03：CUDA Graph 消除 launch bound（前后 profile 对比，1.78×）

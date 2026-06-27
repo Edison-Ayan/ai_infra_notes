@@ -6,7 +6,11 @@
 set -e
 export PATH=$HOME/miniconda3/envs/ai_infra/bin:$PATH
 
-if [ "$2" = "dump" ]; then
+if [ "$1" = "adv" ]; then
+    [ "$2" = "autotune" ] && export ADV=autotune
+    [ "$2" = "break" ] && export ADV=break
+    python compile_advanced.py
+elif [ "$2" = "dump" ]; then
     # TORCH_LOGS=output_code 把 Inductor 生成的 Triton 源码打到 stderr
     TORCH_LOGS=output_code python compile_ffn.py 2> inductor_output.log
     echo

@@ -9,5 +9,6 @@ export PATH=$HOME/miniconda3/envs/ai_infra/bin:$PATH
 case "$1" in
   sweep) python schedule_sweep.py ;;
   lower) python lowering_walk.py ;;
-  *)     echo "用法: ./run.sh [sweep|lower]"; exit 1 ;;
+  tvm)   python tvm_schedule.py ;;
+  *)     echo "用法: ./run.sh [sweep|lower|tvm]"; exit 1 ;;
 esac

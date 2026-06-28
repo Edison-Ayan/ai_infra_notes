@@ -31,7 +31,7 @@ ai-infra-notes/
 | [06](topics/06-flash-attention/) | FlashAttention | 🚧 起步 | online softmax 永不物化 N×N → 显存 O(N²)→O(N)；速度靠 IO-aware tiling+tensor core |
 | [07](topics/07-triton/) | Triton 入门（AI 编译器第一站） | 🚧 进行中 | 手写 GEMM 调度层的自动化：tile 我定，shared/向量化/流水/swizzle/tensor core 编译器包；几十行略胜 cuBLAS(FP32 110%/FP16 105%)，PTX 里自动发出我手抠的 cp.async+mma.sync；融合 matmul+bias+GELU 一个 kernel，越访存 bound 越赚(1.17×→2.28×) |
 | [08](topics/08-torch-compile/) | torch.compile / TorchInductor（图层） | 🚧 进行中 | 图层自动化闭环：Dynamo 捕图→Inductor 自动融合→生成 Triton；pointwise 链 10 kernel→1、11.97×，FFN 算力 bound 1.05×；生成的 `triton_poi_fused_addmm_gelu` 正是 topic07 手写的融合 kernel；进阶 max-autotune(小卡退回 cuBLAS) + graph break |
-| [09](topics/09-compiler-principles/) | AI 编译器原理（算法/调度分离 + lowering） | 🚧 进行中 | 两块地基：① 同一 matmul 算法只换调度差 4.7×(Halide 算法与调度分离)；② 渐进式 lowering——tt.dot 经 ttgir(#mma/#shared) 降到 ptx(64 mma.sync+33 cp.async)，每层 dialect 降一个台阶 |
+| [09](topics/09-compiler-principles/) | AI 编译器原理（算法/调度分离 + lowering） | 🚧 进行中 | 两块地基：① 同一 matmul 算法只换调度差 4.7×(Halide 算法与调度分离)，TVM 亲手写 compute+schedule 同算法 113×；② 渐进式 lowering——tt.dot 经 ttgir(#mma/#shared) 降到 ptx(64 mma.sync+33 cp.async)，每层 dialect 降一个台阶 |
 
 ## 学习日志
 
@@ -52,6 +52,8 @@ ai-infra-notes/
 - **2026-06-26** 主题 08 进阶(深入 Inductor)：① **max-autotune**=把 topic07 的 `@autotune` 搬到图层，让 Inductor 用自己的 Triton matmul 模板当场搜 config 替 cuBLAS。4096³ 实测 eager/默认 24.5 TFLOPS、max-autotune 反降到 22——日志 `Not enough SMs to use max_autotune_gemm`：**4060 只 24 个 SM 低于门槛，编译器主动拒用 Triton 模板退回 cuBLAS**，那 22 是绕一圈的开销。法则:**模板/调度选择看硬件**，小卡 cuBLAS 已最优、编译器不硬碰(A100/H100 才会真用模板)。② **graph break**:`dynamo.explain` 看 data-dependent 控制流断图——纯张量算子 0 断点/1 段，`if x.sum()>0` 值依赖分支 1 断点/2 段。法则:forward 别用依赖张量值的 python 分支(改 `torch.where`/mask)，断图碎掉融合。
 
 - **2026-06-26** 主题 09 AI 编译器原理(从"会用"到"懂原理")：两块所有 AI 编译器(Halide/TVM/MLIR/Triton/XLA)共享的地基，各用一个 Triton demo 坐实。① **算法与调度分离**:同一个 `matmul_kernel`(算法一字不改)手喂 4 组调度(只改 BLOCK/warps/stages)，4096³ FP16 从 16³tile 的 5.17 TFLOPS 到 128²tile 的 24.43——**最好/最差差 4.7×，性能全在调度里**。这正是编译器的价值:算法谁都会写(C=A@B)，难的是搜调度空间；topic01 我人肉搜、@autotune 自动搜。② **渐进式 lowering**:编译一个 GEMM dump 每层 IR——`tt.dot`(ttir 算法层 1 个)→ ttgir 调度层绑 `#mma`(25)/`#shared`(100) 布局 → ptx 机器层摊成 64 条 `mma.sync`+33 条 `cp.async`。每层 dialect 只降一个抽象台阶(MLIR 多层 IR 方法论)。串起来:算法→(分离/搜调度)→调度→(渐进 lowering)→机器码，topic01 在底层人肉干、07/08 看自动干、09 看清凭什么能自动干。下一步:MLIR dialect 体系、TVM TE 手写 compute+schedule。
+
+- **2026-06-28** 主题 09 实验③(把"算法/调度分离"从看懂变会写)：装 CPU 版 `apache-tvm`，亲手用 TVM 显式调度原语调一个 naive matmul。算法 `te.compute(C=A@B)` 写一次不动，只改调度：默认 i,j,k 2270ms → `reorder(i,k,j)` 连续访存 83ms(27×) → `+split tile+parallel+vectorize` 20ms(**113×**)。比实验①的 4.7× 还猛(CPU naive 太烂衬托)，调度后 IR 肉眼可见 `T.parallel`/`T.vectorized`——**调度重塑循环不改数学**。**踩坑(已记 lab 注释)**:TVM 0.25 的 apache-tvm-ffi 带的 torch C-dlpack 扩展跟 torch 2.6 ABI 不兼容、`import tvm` 即崩 → `sys.modules["torch_c_dlpack_ext"]=None` 让可选扩展干净降级;这版还把子包 `tir`→`s_tir`、方法 `get_block`→`get_sblock`(迁移期过渡名)。下一步:把调度搬 GPU target(bind threadIdx)对比 Triton。
 
 ## TODO / 下一步
 
